@@ -1,0 +1,53 @@
+name: stockteam
+
+services:
+  mysql:
+    image: mysql:8.4
+    env_file: .env
+    environment:
+      MYSQL_DATABASE: gp_circle
+      MYSQL_USER: gp
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql:/var/lib/mysql
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../backend
+    env_file: .env
+    environment:
+      GP_DEBUG: "0"
+      GP_ALLOWED_HOSTS: stockteam.uasier.com
+      GP_CSRF_TRUSTED_ORIGINS: https://stockteam.uasier.com
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - media:/app/media
+    depends_on:
+      - mysql
+      - redis
+    restart: unless-stopped
+
+  web:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1:40601:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./tls:/etc/nginx/tls:ro
+      - ./html:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  mysql:
+  media:

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>股票小分队</title>
+    <meta name="description" content="股票小分队：一起观察、记录持仓，并在小群里跟进买卖。" />
+    <link rel="icon" href="/app/favicon.png" />
+    <style>
+      :root { color-scheme: light; --ink: #1c1917; --muted: #57534e; --line: #e7e5e4; --paper: #faf7f2; --red: #dc2626; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: "Songti SC", "Noto Serif SC", serif; background: var(--paper); color: var(--ink); }
+      main { max-width: 760px; margin: 0 auto; padding: 72px 24px 96px; }
+      p { color: var(--muted); line-height: 1.7; }
+      .mark { letter-spacing: 0.18em; font-size: 13px; color: var(--red); }
+      h1 { font-size: 48px; font-weight: 600; margin: 12px 0 8px; }
+      .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 32px 0; }
+      a.button { text-decoration: none; border-radius: 999px; padding: 12px 18px; font-family: system-ui, sans-serif; font-size: 14px; }
+      a.primary { background: var(--ink); color: white; }
+      a.secondary { border: 1px solid var(--line); color: var(--ink); }
+      ul { padding-left: 18px; color: var(--muted); line-height: 1.8; }
+      footer { margin-top: 48px; font-size: 13px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">STOCKTEAM</div>
+      <h1>股票小分队</h1>
+      <p>一起看股票，记下观察和持仓，也能跟进同伴的买卖。网页可以直接用，桌面和手机安装包从这里下载。</p>
+      <div class="actions">
+        <a class="button primary" href="/app/">打开在线网站</a>
+        <a class="button secondary" href="https://github.com/uasier/stockteam/releases">下载安装包</a>
+      </div>
+      <ul>
+        <li>在线网站和接口都在 stockteam.uasier.com。</li>
+        <li>macOS、Windows、Android 安装包发布在 GitHub Releases。</li>
+        <li>第一次注册使用邀请码 ADMIN，这个账号是管理员。</li>
+      </ul>
+      <footer>讨论和记录只供交流，不构成投资建议。</footer>
+    </main>
+  </body>
+</html>

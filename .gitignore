@@ -1,5 +1,8 @@
 node_modules/
 dist/
+dist-web/
+deploy/tls/
+deploy/html/
 .DS_Store
 *.zip
 
