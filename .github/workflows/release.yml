@@ -2,12 +2,22 @@ name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      targets:
+        description: desktop、android 或 all
+        default: all
+        type: choice
+        options:
+          - all
+          - desktop
+          - android
   push:
     tags:
       - "v*"
 
 jobs:
   desktop:
+    if: github.event_name == 'push' || inputs.targets != 'android'
     permissions:
       contents: write
     strategy:
@@ -54,6 +64,7 @@ jobs:
           args: ${{ matrix.args }}
 
   android:
+    if: github.event_name == 'push' || inputs.targets != 'desktop'
     permissions:
       contents: write
     runs-on: ubuntu-22.04
@@ -65,11 +76,18 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
-
       - name: 安装 Android SDK 和 NDK
         run: |
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+          sudo apt-get update
+          sudo apt-get install -y unzip wget
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdtools.zip
+          unzip -q /tmp/cmdtools.zip -d "$HOME/android-sdk/cmdline-tools"
+          mv "$HOME/android-sdk/cmdline-tools/cmdline-tools" "$HOME/android-sdk/cmdline-tools/latest"
+          export ANDROID_HOME="$HOME/android-sdk"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           mkdir -p "$HOME/.android"
           keytool -genkeypair -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
