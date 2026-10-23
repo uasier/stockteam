@@ -1,0 +1,47 @@
+{
+  "name": "gp-circle",
+  "private": true,
+  "version": "0.2.5",
+  "description": "股票小分队：A股协同观察、持仓与跟投交流",
+  "homepage": "https://stockteam.uasier.com/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/uasier/stockteam.git"
+  },
+  "keywords": [
+    "股票小分队",
+    "A股",
+    "自选",
+    "持仓",
+    "tauri"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "api": "uv run --directory backend python manage.py runserver 127.0.0.1:40301",
+    "migrate": "uv run --directory backend python manage.py migrate",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "tauri:android:init": "tauri android init --ci",
+    "tauri:android:dev": "tauri android dev",
+    "tauri:android:build": "tauri android build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vitest": "^3.2.4"
+  }
+}

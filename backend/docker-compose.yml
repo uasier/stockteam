@@ -1,0 +1,23 @@
+name: gp-circle
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: gp_circle
+      MYSQL_USER: gp
+      MYSQL_PASSWORD: gp_circle
+      MYSQL_ROOT_PASSWORD: gp_root
+    ports:
+      - "40310:3306"
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - gp_circle_mysql:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "40311:6379"
+
+volumes:
+  gp_circle_mysql:
