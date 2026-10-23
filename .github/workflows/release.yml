@@ -16,7 +16,37 @@ on:
       - "v*"
 
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: 确保 Release 存在
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          tag="v${{ steps.meta.outputs.version }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists"
+            exit 0
+          fi
+          gh release create "$tag" \
+            --title "股票小分队 ${tag}" \
+            --notes "$(printf '%s\n' \
+              '在线网站：https://stockteam.uasier.com/app/' \
+              '下载页：https://stockteam.uasier.com/' \
+              '接口：https://stockteam.uasier.com/api/')"
+
   desktop:
+    needs: prepare
     if: github.event_name == 'push' || inputs.targets != 'android'
     permissions:
       contents: write
@@ -63,7 +93,71 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
+      - name: 上传可读文件名
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MATRIX_ARGS: ${{ matrix.args }}
+        run: |
+          set -eu
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          tag="v${version}"
+          case "$MATRIX_ARGS" in
+            *aarch64-apple-darwin*)
+              dest="StockTeam-${version}-mac-arm64.dmg"
+              kind=dmg
+              ;;
+            *x86_64-apple-darwin*)
+              dest="StockTeam-${version}-mac-intel.dmg"
+              kind=dmg
+              ;;
+            *)
+              dest="StockTeam-${version}-windows-x64-setup.exe"
+              kind=exe
+              ;;
+          esac
+          if [ "$kind" = dmg ]; then
+            src="$(/usr/bin/find src-tauri/target -type f -name '*.dmg' | head -n 1)"
+          else
+            src="$(/usr/bin/find src-tauri/target -type f -path '*/nsis/*.exe' | head -n 1)"
+          fi
+          if [ -z "$src" ] || [ ! -f "$src" ]; then
+            echo "未找到安装包"
+            /usr/bin/find src-tauri/target -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' \) || true
+            exit 1
+          fi
+          cp "$src" "$dest"
+          gh release upload "$tag" "$dest" --clobber
+          gh release view "$tag" --json assets --jq '.assets[].name' > assets.txt
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            [ "$name" = "$dest" ] && continue
+            case "$name" in
+              StockTeam-*) continue ;;
+            esac
+            drop=0
+            case "$MATRIX_ARGS" in
+              *aarch64-apple-darwin*)
+                case "$name" in *aarch64*) drop=1 ;; esac
+                ;;
+              *x86_64-apple-darwin*)
+                case "$name" in
+                  *_x64.dmg|*_x64.app.tar.gz) drop=1 ;;
+                esac
+                ;;
+              *)
+                case "$name" in
+                  *setup.exe|*.msi) drop=1 ;;
+                esac
+                ;;
+            esac
+            if [ "$drop" = 1 ]; then
+              gh release delete-asset "$tag" --yes -- "$name" || true
+            fi
+          done < assets.txt
+
   android:
+    needs: prepare
     if: github.event_name == 'push' || inputs.targets != 'desktop'
     permissions:
       contents: write
@@ -117,6 +211,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          version="$(jq -r .version src-tauri/tauri.conf.json)"
-          apk="$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -print)"
-          gh release upload "v${version}" $apk --clobber
+          set -eu
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          tag="v${version}"
+          apk="$(/usr/bin/find src-tauri/gen/android/app/build/outputs/apk -type f -name 'app-universal-release.apk' | head -n 1)"
+          if [ -z "$apk" ] || [ ! -f "$apk" ]; then
+            echo "未找到 universal apk"
+            /usr/bin/find src-tauri/gen/android -type f -name '*.apk' || true
+            exit 1
+          fi
+          dest="StockTeam-${version}-android.apk"
+          cp "$apk" "$dest"
+          gh release upload "$tag" "$dest" --clobber
+          gh release view "$tag" --json assets --jq '.assets[].name' > assets.txt
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            [ "$name" = "$dest" ] && continue
+            case "$name" in
+              *.apk) gh release delete-asset "$tag" --yes -- "$name" || true ;;
+            esac
+          done < assets.txt
