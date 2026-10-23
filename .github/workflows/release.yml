@@ -56,7 +56,6 @@ jobs:
   android:
     permissions:
       contents: write
-    needs: desktop
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
