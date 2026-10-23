@@ -1,6 +1,6 @@
 [package]
 name = "gp-circle"
-version = "0.2.5"
+version = "1.0.0"
 description = "股票小分队桌面与 Android 外壳"
 authors = ["you"]
 license = "MIT"

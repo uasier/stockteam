@@ -1,7 +1,7 @@
 {
   "name": "gp-circle",
   "private": true,
-  "version": "0.2.5",
+  "version": "1.0.0",
   "description": "股票小分队：A股协同观察、持仓与跟投交流",
   "homepage": "https://stockteam.uasier.com/",
   "repository": {

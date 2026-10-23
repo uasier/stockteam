@@ -30,19 +30,13 @@ uv run python manage.py runserver 127.0.0.1:40301
 
 ## 行情
 
-现价和涨跌幅来自东方财富公开接口：
+实时行情、搜索和新闻标题都在用户设备上请求，服务器不访问东方财富、新浪或腾讯。设备拿到价格后，用 `POST /api/quotes` 把快照写回小群。风险排查由设备检索标题，再把标题交给 `POST /api/stocks/<code>/risk` 生成报告。
 
-- `https://push2delay.eastmoney.com/api/qt/ulist.np/get`
-- 失败时改用 `https://push2.eastmoney.com/api/qt/ulist.np/get`
-- 东方财富没有返回时，再用新浪 `https://hq.sinajs.cn/list=`。系统代理和直连都会试一次。
-- 搜索用 `https://searchapi.eastmoney.com/api/suggest/get`
-- 风险备忘里的标题用 `https://search-api-web.eastmoney.com/search/jsonp`
-
-同一只股票 20 秒内复用 Redis。成员点击「刷新行情」会跳过缓存，把新价格写回数据库。北交所 `92` 开头的代码使用 `0.` 前缀，已用 `920027` 核对过。
+北交所 `92` 开头的代码使用 `0.` 前缀。
 
 ## 风险备忘
 
-打开股票时先取最近的公开标题。没有 DeepSeek API Key 时，只展示标题，并写明没有做正负面判断，不会编造监管或新闻。管理员可在接口 `GET/PATCH /api/ai-key` 保存密钥；还没保存过时沿用环境变量 `AI_API_KEY`。`AI_BASE_URL` 默认是 `https://api.deepseek.com/v1`。
+公开标题由用户设备检索后提交。没有 DeepSeek API Key 时，只展示标题，并写明没有做正负面判断，不会编造监管或新闻。管理员可在接口 `GET/PATCH /api/ai-key` 保存密钥；还没保存过时沿用环境变量 `AI_API_KEY`。`AI_BASE_URL` 默认是 `https://api.deepseek.com/v1`。
 
 ## 接口
 
@@ -51,7 +45,7 @@ uv run python manage.py runserver 127.0.0.1:40301
 - `POST /api/auth/avatar`、`DELETE /api/auth/avatar`、`GET /api/auth/avatar/<id>`。头像限 PNG、JPG、GIF、WEBP，不超过 2MB
 - `GET/POST /api/auth/invites` 仅管理员
 - `GET /api/stocks/search?q=`
-- `GET /api/quotes?codes=`、`POST /api/quotes` 主动刷新
+- `GET /api/quotes?codes=` 只读已保存的价格。`POST /api/quotes` 写入设备取到的行情快照，服务器不访问行情源
 - `GET/POST /api/watch`、`PATCH/DELETE /api/watch/<id>`。观察列表对小群全员可见。首位加入的人记下自选价格，其他人跟进时不记录自选价格
 - `GET/POST /api/holdings`、`POST /api/holdings/<id>/sell`。当前持仓对小群可见，并带回持有人；已卖出仍只看本人
 - `GET /api/feed`、`POST /api/feed/<id>/follow`。加入观察、更新自选、移出观察、买卖、关注和评论都会写入动态。买卖可以跟随；观察可以跟进，跟进不记自选价格

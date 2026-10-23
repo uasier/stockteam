@@ -1,25 +1,9 @@
-from django.conf import settings
-from django.core.cache import cache
+from decimal import Decimal, InvalidOperation
+
 from django.utils import timezone
 
 from .models import Stock
-from .quotes import Quote, QuoteError, fetch_quotes
-
-CACHE_PREFIX = "gp:quote:"
-
-
-def _cache_get(key: str):
-    try:
-        return cache.get(key)
-    except Exception:
-        return None
-
-
-def _cache_set(key: str, value, ttl: int) -> None:
-    try:
-        cache.set(key, value, ttl)
-    except Exception:
-        return
+from .quotes import Quote
 
 
 def apply_quote(stock: Stock, quote: Quote) -> None:
@@ -35,29 +19,38 @@ def apply_quote(stock: Stock, quote: Quote) -> None:
     stock.save()
 
 
-def refresh_quotes(codes: list[str], *, force: bool) -> list[Stock]:
-    """取行情并写回股票表。force 为假时，缓存未过期的代码不再请求上游。"""
-    pending = []
-    cached_codes = []
-    for code in codes:
-        blob = None if force else _cache_get(CACHE_PREFIX + code)
-        if blob is None:
-            pending.append(code)
-        else:
-            cached_codes.append(code)
-    if pending:
-        quotes = fetch_quotes(pending)
-        by_code = {quote.code: quote for quote in quotes}
-        for code in pending:
-            quote = by_code.get(code)
-            if quote is None:
-                continue
-            stock, _ = Stock.objects.get_or_create(code=code, defaults={"name": quote.name or code})
-            apply_quote(stock, quote)
-            _cache_set(CACHE_PREFIX + code, code, settings.QUOTE_CACHE_SECONDS)
-    stocks = list(Stock.objects.filter(code__in=codes))
-    order = {code: index for index, code in enumerate(codes)}
-    stocks.sort(key=lambda item: order.get(item.code, 0))
-    if pending and not stocks and not cached_codes:
-        raise QuoteError("行情暂时没有取到")
-    return stocks
+def _decimal(value):
+    if value is None or value == "" or value == "-":
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not number.is_finite():
+        return None
+    return number
+
+
+def store_quotes(items: list) -> list[Stock]:
+    """只保存设备已经取到的行情，服务器不再访问行情源。"""
+    saved = []
+    for raw in items[:80]:
+        if not isinstance(raw, dict):
+            continue
+        code = str(raw.get("code") or "").strip()
+        if len(code) != 6 or not code.isdigit():
+            continue
+        quote = Quote(
+            code=code,
+            name=str(raw.get("name") or "").strip(),
+            price=_decimal(raw.get("price")),
+            change_pct=_decimal(raw.get("change_pct")),
+            open_price=_decimal(raw.get("open")),
+            high=_decimal(raw.get("high")),
+            low=_decimal(raw.get("low")),
+            prev_close=_decimal(raw.get("prev_close")),
+        )
+        stock, _ = Stock.objects.get_or_create(code=code, defaults={"name": quote.name or code})
+        apply_quote(stock, quote)
+        saved.append(stock)
+    return saved

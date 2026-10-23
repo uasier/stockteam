@@ -1,6 +1,6 @@
 [project]
 name = "gp-circle"
-version = "0.2.5"
+version = "1.0.0"
 description = "股票小分队接口"
 readme = "README.md"
 requires-python = ">=3.12"

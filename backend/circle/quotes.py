@@ -8,7 +8,9 @@ Rust 行情客户端一致：f12 代码、f14 名称、f2 现价、f3 涨跌幅�
 from __future__ import annotations
 
 import json
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
@@ -19,12 +21,17 @@ ULIST_URLS = (
     "https://push2.eastmoney.com/api/qt/ulist.np/get",
 )
 SUGGEST_URL = "https://searchapi.eastmoney.com/api/suggest/get"
+TENCENT_SUGGEST_URL = "https://smartbox.gtimg.cn/s3/"
+A_SHARE_MARKETS = {"沪A", "深A", "科创板", "京A", "创业板"}
 NEWS_URL = "https://search-api-web.eastmoney.com/search/jsonp"
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://quote.eastmoney.com/",
 }
 CODE_RE = re.compile(r"\d{6}")
+CONNECT_TIMEOUT = 2
+READ_TIMEOUT = 4
+PROXY_ENV = ("https_proxy", "http_proxy", "all_proxy", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
 
 
 class QuoteError(Exception):
@@ -126,6 +133,27 @@ def parse_ulist(payload: dict) -> list[Quote]:
     return quotes
 
 
+def _a_share_market(code: str, market: str = "", classify: str = "") -> str:
+    label = market.strip()
+    if label in A_SHARE_MARKETS:
+        return label
+    if label:
+        return ""
+    if classify not in {"", "AStock", "NEEQ", "23", "80", "81"}:
+        return ""
+    if code.startswith("688"):
+        return "科创板"
+    if code.startswith(("60", "68")):
+        return "沪A"
+    if code.startswith("30"):
+        return "创业板"
+    if code.startswith(("92", "83", "87", "43")):
+        return "京A"
+    if code.startswith("00"):
+        return "深A"
+    return ""
+
+
 def parse_suggest(payload: dict) -> list[dict]:
     table = payload.get("QuotationCodeTable") if isinstance(payload, dict) else None
     rows = table.get("Data") if isinstance(table, dict) else None
@@ -136,17 +164,47 @@ def parse_suggest(payload: dict) -> list[dict]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if row.get("Classify") not in (None, "", "AStock"):
-            continue
         code = normalize_code(row.get("Code"))
-        if not code or code in seen or eastmoney_secid(code) is None:
+        market = _a_share_market(code or "", str(row.get("SecurityTypeName") or ""), str(row.get("Classify") or ""))
+        if not code or not market or code in seen or eastmoney_secid(code) is None:
             continue
         seen.add(code)
         items.append(
             {
                 "code": code,
                 "name": str(row.get("Name") or "").strip(),
-                "market": str(row.get("SecurityTypeName") or "").strip(),
+                "market": market,
+                "pinyin": str(row.get("PinYin") or "").strip().lower(),
+            }
+        )
+    return items
+
+
+def parse_tencent(text: str) -> list[dict]:
+    matched = re.search(r'v_hint="(.*)"', text or "")
+    if not matched:
+        return []
+    body = matched.group(1)
+    if body in {"", "N"}:
+        return []
+    if "\\u" in body:
+        body = body.encode("utf-8").decode("unicode_escape")
+    items = []
+    seen = set()
+    for part in body.split("^"):
+        bits = part.split("~")
+        if len(bits) < 5:
+            continue
+        code = normalize_code(bits[1])
+        if not code or code in seen or not bits[4].startswith("GP-A") or eastmoney_secid(code) is None:
+            continue
+        seen.add(code)
+        items.append(
+            {
+                "code": code,
+                "name": bits[2].strip(),
+                "market": _a_share_market(code),
+                "pinyin": bits[3].strip().lower(),
             }
         )
     return items
@@ -177,30 +235,61 @@ def parse_news(payload: dict) -> list[Headline]:
     return headlines
 
 
-def _sessions():
-    """先走系统代理，再直连。本机代理时好时坏，两条都试过才判断上游不可用。"""
-    for trust_env in (True, False):
-        session = requests.Session()
-        session.trust_env = trust_env
-        yield session
+def _proxy_configured() -> bool:
+    return any(os.environ.get(name) for name in PROXY_ENV)
 
 
-def _get_json(url: str, params: dict, timeout: float = 8, headers: dict | None = None) -> dict:
-    last_error: Exception | None = None
-    for session in _sessions():
-        try:
-            response = session.get(url, params=params, headers=headers or HEADERS, timeout=timeout)
-            response.raise_for_status()
-            payload = response.json()
-        except requests.RequestException as exc:
-            last_error = exc
-            continue
-        except ValueError as exc:
-            last_error = exc
-            continue
-        if isinstance(payload, dict):
-            return payload
-    raise QuoteError("行情接口没有响应") from last_error
+def _modes() -> tuple[bool, ...]:
+    """False 是直连。只有环境里真有代理时才同时再试代理。"""
+    if _proxy_configured():
+        return (False, True)
+    return (False,)
+
+
+def _race(jobs: list):
+    """同时发出请求，采用第一个非空结果。失败的来源不再往后排队等超时。"""
+    if not jobs:
+        raise QuoteError("行情接口没有响应")
+    if len(jobs) == 1:
+        value = jobs[0]()
+        if not value:
+            raise QuoteError("行情接口没有响应")
+        return value
+    pool = ThreadPoolExecutor(max_workers=len(jobs))
+    futures = [pool.submit(job) for job in jobs]
+    errors: list[Exception] = []
+    try:
+        for future in as_completed(futures):
+            try:
+                value = future.result()
+            except Exception as exc:
+                errors.append(exc)
+                continue
+            if value:
+                return value
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    raise QuoteError("行情接口没有响应") from (errors[-1] if errors else None)
+
+
+def _read_json(url: str, params: dict, trust_env: bool, headers: dict | None = None) -> dict:
+    session = requests.Session()
+    session.trust_env = trust_env
+    response = session.get(
+        url,
+        params=params,
+        headers=headers or HEADERS,
+        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise QuoteError("行情接口没有响应")
+    return payload
+
+
+def _get_json(url: str, params: dict, headers: dict | None = None) -> dict:
+    return _race([lambda mode=mode: _read_json(url, params, mode, headers) for mode in _modes()])
 
 
 def sina_symbol(code: str) -> str | None:
@@ -259,14 +348,15 @@ def _fetch_eastmoney(codes: list[str]) -> list[Quote]:
             "fields": "f12,f14,f2,f3,f15,f16,f17,f18",
             "secids": ",".join(secid for _, secid in chunk),
         }
-        parsed: list[Quote] = []
-        for url in ULIST_URLS:
-            try:
-                parsed = parse_ulist(_get_json(url, params))
-                last_error = None
-                break
-            except QuoteError as exc:
-                last_error = exc
+        def load(url: str) -> list[Quote]:
+            return parse_ulist(_get_json(url, params))
+
+        try:
+            parsed = _race([lambda url=url: load(url) for url in ULIST_URLS])
+            last_error = None
+        except QuoteError as exc:
+            parsed = []
+            last_error = exc
         if last_error and not collected and start == 0:
             raise last_error
         collected.extend(parsed)
@@ -277,26 +367,23 @@ def _fetch_sina(codes: list[str]) -> list[Quote]:
     symbols = [symbol for code in codes if (symbol := sina_symbol(code))]
     if not symbols:
         return []
-    last_error: Exception | None = None
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
-    for session in _sessions():
-        try:
-            response = session.get(
-                "https://hq.sinajs.cn/list=" + ",".join(symbols),
-                headers=headers,
-                timeout=8,
-            )
-            response.raise_for_status()
-            text = response.content.decode("gbk", errors="replace")
-        except requests.RequestException as exc:
-            last_error = exc
-            continue
-        parsed = parse_sina(text)
-        if parsed:
-            return parsed
-    if last_error:
-        raise QuoteError("行情接口没有响应") from last_error
-    return []
+
+    def load(trust_env: bool) -> list[Quote]:
+        session = requests.Session()
+        session.trust_env = trust_env
+        response = session.get(
+            "https://hq.sinajs.cn/list=" + ",".join(symbols),
+            headers=headers,
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
+        response.raise_for_status()
+        parsed = parse_sina(response.content.decode("gbk", errors="replace"))
+        if not parsed:
+            raise QuoteError("行情接口没有响应")
+        return parsed
+
+    return _race([lambda mode=mode: load(mode) for mode in _modes()])
 
 
 def fetch_quotes(codes: list[str]) -> list[Quote]:
@@ -314,14 +401,66 @@ def fetch_quotes(codes: list[str]) -> list[Quote]:
     raise QuoteError("行情接口没有响应")
 
 
-def search_stocks(keyword: str) -> list[dict]:
+def _load_eastmoney_suggest(keyword: str) -> list[dict]:
     params = {
         "input": keyword,
         "type": "14",
         "token": "D43BF722C8E33BDC906FB84D85E326E8",
         "count": "8",
     }
-    return parse_suggest(_get_json(SUGGEST_URL, params, timeout=6))
+    return parse_suggest(_get_json(SUGGEST_URL, params))
+
+
+def _load_tencent_suggest(keyword: str) -> list[dict]:
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
+
+    def load(trust_env: bool) -> list[dict]:
+        session = requests.Session()
+        session.trust_env = trust_env
+        response = session.get(
+            TENCENT_SUGGEST_URL,
+            params={"v": "2", "q": keyword, "t": "gp"},
+            headers=headers,
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
+        response.raise_for_status()
+        text = response.content.decode("utf-8", errors="replace")
+        if "v_hint" not in text:
+            text = response.content.decode("gbk", errors="replace")
+        items = parse_tencent(text)
+        if not items:
+            raise QuoteError("没有搜索结果")
+        return items
+
+    return _race([lambda mode=mode: load(mode) for mode in _modes()])
+
+
+def search_stocks(keyword: str) -> list[dict]:
+    """名称、代码、拼音首字母。腾讯对简写首字母更准，东方财富补科创板和北交所。"""
+    text = str(keyword or "").strip()
+    if not text:
+        return []
+    pool = ThreadPoolExecutor(max_workers=2)
+    eastmoney = pool.submit(_load_eastmoney_suggest, text)
+    tencent = pool.submit(_load_tencent_suggest, text)
+    found = {"eastmoney": [], "tencent": []}
+    for key, future in (("eastmoney", eastmoney), ("tencent", tencent)):
+        try:
+            found[key] = future.result()
+        except Exception:
+            found[key] = []
+    pool.shutdown(wait=False, cancel_futures=True)
+    items = []
+    seen = set()
+    for source in ("tencent", "eastmoney"):
+        for item in found[source]:
+            if item["code"] in seen:
+                continue
+            seen.add(item["code"])
+            items.append({"code": item["code"], "name": item["name"], "market": item["market"]})
+            if len(items) >= 8:
+                return items
+    return items
 
 
 def fetch_headlines(keyword: str) -> list[Headline]:
@@ -343,32 +482,28 @@ def fetch_headlines(keyword: str) -> list[Headline]:
             }
         },
     }
-    text = ""
-    last_error: Exception | None = None
-    for session in _sessions():
+    headers = {**HEADERS, "Referer": "https://so.eastmoney.com/"}
+    params = {"cb": "cb", "param": json.dumps(param, ensure_ascii=False)}
+
+    def load(trust_env: bool) -> list[Headline]:
+        session = requests.Session()
+        session.trust_env = trust_env
+        response = session.get(NEWS_URL, params=params, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+        response.raise_for_status()
+        text = response.text.strip()
+        if text.startswith("cb("):
+            text = text[3:]
+        if text.endswith(");"):
+            text = text[:-2]
+        elif text.endswith(")"):
+            text = text[:-1]
         try:
-            response = session.get(
-                NEWS_URL,
-                params={"cb": "cb", "param": json.dumps(param, ensure_ascii=False)},
-                headers={**HEADERS, "Referer": "https://so.eastmoney.com/"},
-                timeout=8,
-            )
-            response.raise_for_status()
-            text = response.text.strip()
-            last_error = None
-            break
-        except requests.RequestException as exc:
-            last_error = exc
-    if last_error or not text:
-        raise QuoteError("新闻标题没有取到") from last_error
-    if text.startswith("cb("):
-        text = text[3:]
-    if text.endswith(")"):
-        text = text[:-1]
-    if text.endswith(");"):
-        text = text[:-2]
-    try:
-        payload = json.loads(text)
-    except ValueError as exc:
-        raise QuoteError("新闻标题无法解析") from exc
-    return parse_news(payload)
+            payload = json.loads(text)
+        except ValueError as exc:
+            raise QuoteError("新闻标题无法解析") from exc
+        headlines = parse_news(payload)
+        if not headlines:
+            raise QuoteError("新闻标题没有取到")
+        return headlines
+
+    return _race([lambda mode=mode: load(mode) for mode in _modes()])

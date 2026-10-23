@@ -1,4 +1,5 @@
 import json
+import os
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -9,7 +10,25 @@ from rest_framework.test import APIClient
 
 from accounts.models import User
 from circle.models import Stock
-from circle.quotes import Headline, eastmoney_secid, parse_news, parse_sina, parse_suggest, parse_ulist, sina_symbol
+import requests
+
+from circle.quotes import (
+    CONNECT_TIMEOUT,
+    PROXY_ENV,
+    READ_TIMEOUT,
+    Headline,
+    QuoteError,
+    _modes,
+    _race,
+    eastmoney_secid,
+    fetch_quotes,
+    parse_news,
+    parse_sina,
+    parse_suggest,
+    parse_tencent,
+    parse_ulist,
+    sina_symbol,
+)
 from circle.risk import build_report, scan_headlines, stance_of
 
 
@@ -64,11 +83,65 @@ class QuoteParseTests(SimpleTestCase):
                 }
             }
         )
-        self.assertEqual(items, [{"code": "600519", "name": "贵州茅台", "market": "沪A"}])
+        self.assertEqual(items, [{"code": "600519", "name": "贵州茅台", "market": "沪A", "pinyin": ""}])
+        kept = parse_suggest(
+            {
+                "QuotationCodeTable": {
+                    "Data": [
+                        {"Code": "688981", "Name": "中芯国际", "PinYin": "ZXGJ", "Classify": "23", "SecurityTypeName": "科创板"},
+                        {"Code": "920027", "Name": "交大铁发", "PinYin": "JDTF", "Classify": "NEEQ", "SecurityTypeName": "京A"},
+                        {"Code": "MAT", "Name": "美泰", "PinYin": "MT", "Classify": "UsStock", "SecurityTypeName": "美股"},
+                    ]
+                }
+            }
+        )
+        self.assertEqual([item["code"] for item in kept], ["688981", "920027"])
         headlines = parse_news(
             {"result": {"cmsArticleWebOld": [{"title": "减持公告", "mediaName": "交易所", "date": "2026-10-23", "url": "https://example.com"}]}}
         )
         self.assertEqual(headlines[0].title, "减持公告")
+        hint = (
+            r'v_hint="sh~600519~\u8d35\u5dde\u8305\u53f0~gzmt~GP-A'
+            r'^sz~399990~\u7164\u70ad\u7b49\u6743~mtdq~ZS'
+            r'^sh~688981~\u4e2d\u82af\u56fd\u9645~zxgj~GP-A-KCB";'
+        )
+        tencent = parse_tencent(hint)
+        self.assertEqual([(item["code"], item["name"]) for item in tencent], [("600519", "贵州茅台"), ("688981", "中芯国际")])
+
+    def test_quote_requests_skip_proxy_and_race_sources(self):
+        cleared = {name: "" for name in PROXY_ENV}
+        with patch.dict(os.environ, cleared, clear=False):
+            self.assertEqual(_modes(), (False,))
+        with patch.dict(os.environ, {"https_proxy": "http://127.0.0.1:7890"}, clear=False):
+            self.assertEqual(_modes(), (False, True))
+
+        def fail():
+            raise QuoteError("slow")
+
+        self.assertEqual(_race([fail, lambda: [], lambda: ["600519"]]), ["600519"])
+
+        seen: list[tuple[float, float]] = []
+
+        def fake_get(self, url, params=None, headers=None, timeout=None):
+            seen.append(timeout)
+            if "push2delay" in url:
+                raise requests.Timeout("slow")
+
+            class Response:
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"data": {"diff": [{"f12": "600519", "f14": "贵州茅台", "f2": 10, "f3": 1.5}]}}
+
+            return Response()
+
+        with patch.dict(os.environ, cleared, clear=False):
+            with patch("circle.quotes.requests.Session.get", fake_get):
+                quotes = fetch_quotes(["600519"])
+        self.assertIn((CONNECT_TIMEOUT, READ_TIMEOUT), seen)
+        self.assertEqual(quotes[0].code, "600519")
+        self.assertEqual(quotes[0].name, "贵州茅台")
 
     def test_report_without_model_does_not_invent_news(self):
         report = build_report("贵州茅台", "600519", "现价 1", [], api_key="")
@@ -151,9 +224,8 @@ class CircleApiTests(TestCase):
     def auth_as(self, token):
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
 
-    @patch("circle.services.market.refresh_quotes", side_effect=fake_refresh)
-    def test_watch_buy_sell_and_sort_fields(self, _refresh):
-        created = self.client.post("/api/watch", {"code": "600519"}, format="json")
+    def test_watch_buy_sell_and_sort_fields(self):
+        created = self.client.post("/api/watch", {"code": "600519", "name": "贵州茅台", "price": "1335"}, format="json")
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.data["stock"]["name"], "贵州茅台")
         self.assertEqual(created.data["custom_price"], "1335.000")
@@ -173,8 +245,7 @@ class CircleApiTests(TestCase):
         self.assertEqual(listed.data["items"][0]["user"]["username"], "lin")
         self.assertTrue(listed.data["items"][0]["mine"])
 
-    @patch("circle.services.market.refresh_quotes", side_effect=fake_refresh)
-    def test_group_can_see_who_added_a_watch(self, _refresh):
+    def test_group_can_see_who_added_a_watch(self):
         created = self.client.post("/api/watch", {"code": "600519"}, format="json")
         self.assertEqual(created.status_code, 201)
 
@@ -242,8 +313,7 @@ class CircleApiTests(TestCase):
         opened = self.client.get("/api/holdings?status=open")
         self.assertEqual(opened.data["items"], [])
 
-    @patch("circle.services.market.refresh_quotes", side_effect=fake_refresh)
-    def test_follow_like_and_comment(self, _refresh):
+    def test_follow_like_and_comment(self):
         self.auth_as(self.other_token)
         bought = self.client.post(
             "/api/holdings",
@@ -297,9 +367,8 @@ class CircleApiTests(TestCase):
         cannot = self.client.post(f"/api/feed/{sell_id}/follow", {}, format="json")
         self.assertEqual(cannot.status_code, 400)
 
-    @patch("circle.services.market.refresh_quotes", side_effect=fake_refresh)
-    def test_circle_actions_are_saved_to_the_feed(self, _refresh):
-        created = self.client.post("/api/watch", {"code": "600519"}, format="json")
+    def test_circle_actions_are_saved_to_the_feed(self):
+        created = self.client.post("/api/watch", {"code": "600519", "name": "贵州茅台", "price": "1335"}, format="json")
         self.client.patch(
             f"/api/watch/{created.data['id']}",
             {"tag_names": ["白酒"], "note": "先看着"},
@@ -333,8 +402,7 @@ class CircleApiTests(TestCase):
         self.assertEqual(trades.status_code, 200)
         self.assertEqual(trades.data["items"], [])
 
-    @patch("circle.services.market.refresh_quotes", side_effect=fake_refresh)
-    def test_feed_filters_by_activity_kind(self, _refresh):
+    def test_feed_filters_by_activity_kind(self):
         self.client.post("/api/watch", {"code": "600519"}, format="json")
         self.client.post("/api/holdings", {"code": "600519", "cost_price": "1288"}, format="json")
         self.client.post("/api/stocks/600519/comments", {"body": "看看公告"}, format="json")
@@ -355,8 +423,7 @@ class CircleApiTests(TestCase):
         self.assertEqual(unknown.status_code, 400)
         self.assertIn("动态类型", unknown.data["error"])
 
-    @patch("circle.services.market.refresh_quotes", side_effect=fake_refresh)
-    def test_stock_timeline_lists_what_happened_and_when(self, _refresh):
+    def test_stock_timeline_lists_what_happened_and_when(self):
         self.client.post("/api/watch", {"code": "600519"}, format="json")
         self.client.post("/api/holdings", {"code": "600519", "cost_price": "1288"}, format="json")
         self.client.post("/api/stocks/600519/comments", {"body": "看看公告"}, format="json")
@@ -398,13 +465,25 @@ class CircleApiTests(TestCase):
         self.assertEqual(cleared.data["api_key"], "")
         self.assertEqual(current_ai_api_key(), "")
 
-    @patch("circle.services.fetch_headlines")
-    @patch("circle.services.market.refresh_quotes", side_effect=fake_refresh)
-    def test_risk_report_uses_headlines_without_model(self, _refresh, headlines):
-        headlines.return_value = [
-            Headline("公司发布减持计划", "交易所", "2026-10-23", "https://example.com/a")
-        ]
-        first = self.client.get("/api/stocks/600519/risk")
+    def test_risk_report_uses_headlines_sent_by_the_device(self):
+        pending = self.client.get("/api/stocks/600519/risk")
+        self.assertEqual(pending.status_code, 200)
+        self.assertEqual(pending.data["source"], "pending")
+        first = self.client.post(
+            "/api/stocks/600519/risk",
+            {
+                "quote_text": "现价 1",
+                "headlines": [
+                    {
+                        "title": "公司发布减持计划",
+                        "media": "交易所",
+                        "published_at": "2026-10-23",
+                        "url": "https://example.com/a",
+                    }
+                ],
+            },
+            format="json",
+        )
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.data["source"], "unconfigured")
         self.assertEqual(first.data["stance"], "attention")
@@ -415,10 +494,8 @@ class CircleApiTests(TestCase):
         self.assertEqual(first.data["headlines"][0]["title"], "公司发布减持计划")
         second = self.client.get("/api/stocks/600519/risk")
         self.assertEqual(first.data["created_at"], second.data["created_at"])
-        headlines.assert_called_once()
 
-    @patch("circle.services.search_stocks")
-    def test_search(self, search_stocks):
-        search_stocks.return_value = [{"code": "600519", "name": "贵州茅台", "market": "沪A"}]
+    def test_search_reads_saved_names_without_calling_upstream(self):
+        Stock.objects.create(code="600519", name="贵州茅台")
         found = self.client.get("/api/stocks/search", {"q": "茅台"})
         self.assertEqual(found.data["items"][0]["code"], "600519")

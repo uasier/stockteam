@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { api } from "./api"
+import { fetchHeadlines, fetchLiveQuotes } from "./market"
 import { UserAvatar } from "./UserAvatar"
 import {
   feedKindLabel,
@@ -88,11 +89,22 @@ export function DetailSheet({ code, onClose, onChanged, notify }: Props) {
     })
     api
       .risk(code)
-      .then((report) => {
-        if (alive) {
+      .then(async (report) => {
+        if (!alive) return
+        if (report.source !== "pending") {
           setRisk(report)
           setRiskState("ready")
+          return
         }
+        const quotes = await fetchLiveQuotes([code]).catch(() => [])
+        const name = quotes[0]?.name || code
+        const headlines = await fetchHeadlines(`${name} ${code}`)
+        const price = quotes[0]?.price
+        const quoteText = price ? `现价 ${price}，涨跌幅 ${quotes[0]?.change_pct ?? ""}%` : "暂无现价"
+        const next = await api.refreshRisk(code, { headlines, quote_text: quoteText })
+        if (!alive) return
+        setRisk(next)
+        setRiskState("ready")
       })
       .catch(() => {
         if (alive) setRiskState("error")
@@ -165,8 +177,10 @@ export function DetailSheet({ code, onClose, onChanged, notify }: Props) {
               disabled={pending === "refresh"}
               onClick={() =>
                 run("refresh", async () => {
-                  await api.refresh([code])
-                  notify("行情已刷新写回", "success")
+                  const quotes = await fetchLiveQuotes([code])
+                  if (quotes.length === 0) throw new Error("行情暂时没有取到")
+                  await api.saveQuotes(quotes)
+                  notify("行情已刷新", "success")
                 })
               }
               title="刷新实时行情"
@@ -542,7 +556,13 @@ export function DetailSheet({ code, onClose, onChanged, notify }: Props) {
                       run("risk", async () => {
                         setRiskState("loading")
                         try {
-                          const rep = await api.refreshRisk(code)
+                          const quotes = await fetchLiveQuotes([code]).catch(() => [])
+                          const name = quotes[0]?.name || stock?.name || code
+                          const headlines = await fetchHeadlines(`${name} ${code}`)
+                          const price = quotes[0]?.price || stock?.price
+                          const change = quotes[0]?.change_pct || stock?.change_pct
+                          const quoteText = price ? `现价 ${price}，涨跌幅 ${change ?? ""}%` : "暂无现价"
+                          const rep = await api.refreshRisk(code, { headlines, quote_text: quoteText })
                           setRisk(rep)
                           setRiskState("ready")
                           notify("风险报告已重新生成", "success")

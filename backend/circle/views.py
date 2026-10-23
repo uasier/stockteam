@@ -14,24 +14,27 @@ class SearchView(APIView):
         return Response({"items": services.search(request.query_params.get("q", ""))})
 
 
+def _present_quotes(stocks, user):
+    items = []
+    for stock in stocks:
+        attention = stock.likes.count()
+        liked = stock.likes.filter(user=user).exists()
+        items.append(present_stock(stock, attention=attention, liked=liked))
+    return items
+
+
 class QuoteView(APIView):
     def get(self, request):
-        stocks = services.load_quotes(request.query_params.get("codes", ""), force=False)
-        items = []
-        for stock in stocks:
-            attention = stock.likes.count()
-            liked = stock.likes.filter(user=request.user).exists()
-            items.append(present_stock(stock, attention=attention, liked=liked))
-        return Response({"items": items})
+        stocks = services.load_quotes(request.query_params.get("codes", ""))
+        return Response({"items": _present_quotes(stocks, request.user)})
 
     def post(self, request):
-        stocks = services.load_quotes(request.data.get("codes"), force=True)
-        items = []
-        for stock in stocks:
-            attention = stock.likes.count()
-            liked = stock.likes.filter(user=request.user).exists()
-            items.append(present_stock(stock, attention=attention, liked=liked))
-        return Response({"items": items})
+        quotes = request.data.get("quotes")
+        if isinstance(quotes, list) and quotes:
+            stocks = services.store_quotes(quotes)
+        else:
+            stocks = services.load_quotes(request.data.get("codes"))
+        return Response({"items": _present_quotes(stocks, request.user)})
 
 
 class WatchListView(APIView):
@@ -43,7 +46,12 @@ class WatchListView(APIView):
         return Response({"items": items})
 
     def post(self, request):
-        item = services.add_watch(request.user, request.data.get("code", ""))
+        item = services.add_watch(
+            request.user,
+            request.data.get("code", ""),
+            name=str(request.data.get("name") or ""),
+            price=request.data.get("price"),
+        )
         saved = services.own_watch_queryset(request.user).get(pk=item.id)
         return Response(present_watch(saved, viewer_id=request.user.id), status=201)
 
@@ -182,7 +190,34 @@ class AiKeyView(APIView):
 
 class RiskView(APIView):
     def get(self, request, code: str):
-        return Response(present_risk(services.risk_for(code, force=False)))
+        report = services.risk_for(code, force=False)
+        if report is None:
+            from .risk import DISCLAIMER
+
+            return Response(
+                {
+                    "summary": "还没有排查。公开标题会在这台设备上检索。",
+                    "regulatory": "",
+                    "negative_news": "",
+                    "other_risks": [],
+                    "checks": [],
+                    "regulatory_status": "unknown",
+                    "negative_status": "unknown",
+                    "headlines": [],
+                    "stance": "unknown",
+                    "source": "pending",
+                    "model": "",
+                    "created_at": "",
+                    "disclaimer": DISCLAIMER,
+                }
+            )
+        return Response(present_risk(report))
 
     def post(self, request, code: str):
-        return Response(present_risk(services.risk_for(code, force=True)))
+        report = services.risk_for(
+            code,
+            force=True,
+            headlines=services.client_headlines(request.data.get("headlines")),
+            quote_text=str(request.data.get("quote_text") or ""),
+        )
+        return Response(present_risk(report))

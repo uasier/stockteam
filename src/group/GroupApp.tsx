@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ApiError, api, loadSession, saveSession } from "./api"
+import { fetchLiveQuotes, searchStocks } from "./market"
 import { AuthScreen } from "./AuthScreen"
 import { DetailSheet } from "./DetailSheet"
 import { FollowModal } from "./FollowModal"
@@ -194,7 +195,7 @@ export function GroupApp() {
       return
     }
     const timer = window.setTimeout(() => {
-      api.search(text).then((result) => setHits(result.items)).catch(() => setHits([]))
+      searchStocks(text).then((items) => setHits(items)).catch(() => setHits([]))
     }, 220)
     return () => window.clearTimeout(timer)
   }, [query, view])
@@ -204,7 +205,7 @@ export function GroupApp() {
     return rows.map((item) => item.stock.code)
   }, [view, watch, holdings])
 
-  function applyQuotes(stocks: Stock[]) {
+  function applyQuotes(stocks: Array<Partial<Stock> & { code: string }>) {
     setWatch((items) => mergeStock(items, stocks))
     setHoldings((items) => mergeStock(items, stocks))
     setFeed((items) => mergeStock(items, stocks))
@@ -216,10 +217,11 @@ export function GroupApp() {
     if (!session || visibleCodes.length === 0 || view === "feed" || view === "invites") return
     let alive = true
     const load = () => {
-      api
-        .quotes(visibleCodes)
-        .then((result) => {
-          if (alive) applyQuotes(result.items)
+      fetchLiveQuotes(visibleCodes)
+        .then((quotes) => {
+          if (!alive || quotes.length === 0) return
+          applyQuotes(quotes)
+          api.saveQuotes(quotes).catch(() => undefined)
         })
         .catch(() => undefined)
     }
@@ -239,9 +241,11 @@ export function GroupApp() {
     }
     setRefreshing(true)
     try {
-      const result = await api.refresh(codes)
-      applyQuotes(result.items)
-      notify("行情已全面更新，并同步至服务端", "success")
+      const quotes = await fetchLiveQuotes(codes)
+      if (quotes.length === 0) throw new Error("行情暂时没有取到")
+      applyQuotes(quotes)
+      await api.saveQuotes(quotes).catch(() => undefined)
+      notify("行情已更新", "success")
     } catch (err) {
       notify(err instanceof Error ? err.message : "行情刷新失败", "error")
     } finally {
@@ -252,7 +256,9 @@ export function GroupApp() {
   async function addCode(code: string) {
     const followed = watch.some((item) => item.stock.code === code)
     try {
-      await api.addWatch(code)
+      const hit = hits.find((item) => item.code === code)
+      const [quote] = await fetchLiveQuotes([code]).catch(() => [])
+      await api.addWatch(code, { name: quote?.name || hit?.name, price: quote?.price })
       setQuery("")
       setHits([])
       await reload()
@@ -700,7 +706,7 @@ export function GroupApp() {
                     <IconStar size={36} />
                   </div>
                   <h3>小群还没有观察的股票</h3>
-                  <p>在上方搜索框输入任意 A 股代码（如 600519、000001 或 贵州茅台），加入后全员都能看到</p>
+                  <p>在上方搜索框输入代码、名称或拼音首字母，例如 600519、贵州茅台、gzmt，加入后全员都能看到</p>
                 </div>
               )}
 

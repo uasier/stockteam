@@ -9,7 +9,7 @@ from rest_framework.exceptions import NotFound, ValidationError
 
 from . import market
 from .models import Activity, Comment, CommentLike, Holding, RiskReport, Stock, StockLike, Tag, WatchItem
-from .quotes import QuoteError, fetch_headlines, normalize_code, search_stocks
+from .quotes import Headline, normalize_code
 from .risk import build_report
 
 
@@ -140,27 +140,29 @@ def comment_queryset(user, stock: Stock, *, limit: int | None = 100):
 
 
 def search(keyword: str) -> list[dict]:
+    """只查已经记在小群里的股票。实时名称、代码和拼音由设备自己检索。"""
     text = str(keyword or "").strip()
     if not text:
         return []
     if len(text) > 32:
         raise ValidationError("搜索词太长")
-    try:
-        items = search_stocks(text)
-    except QuoteError:
-        items = []
     code = normalize_code(text)
-    if code and not any(item["code"] == code for item in items):
-        items.append({"code": code, "name": "", "market": "代码"})
-    return items[:8]
+    rows = Stock.objects.filter(code__startswith=code) if code else Stock.objects.filter(name__icontains=text)
+    return [{"code": item.code, "name": item.name, "market": ""} for item in rows.order_by("code")[:8]]
 
 
-def load_quotes(raw, *, force: bool) -> list[Stock]:
+def load_quotes(raw, *, force: bool = False) -> list[Stock]:
     codes = _codes(raw)
-    try:
-        return market.refresh_quotes(codes, force=force)
-    except QuoteError as exc:
-        raise ValidationError("行情暂时没有取到，请稍后再刷新") from exc
+    stocks = list(Stock.objects.filter(code__in=codes))
+    order = {code: index for index, code in enumerate(codes)}
+    stocks.sort(key=lambda item: order.get(item.code, 0))
+    return stocks
+
+
+def store_quotes(items) -> list[Stock]:
+    if not isinstance(items, list):
+        return []
+    return market.store_quotes(items)
 
 
 def _ensure_stock(raw: str) -> Stock:
@@ -170,27 +172,26 @@ def _ensure_stock(raw: str) -> Stock:
     stock = Stock.objects.filter(code=code).first()
     if stock:
         return stock
-    try:
-        market.refresh_quotes([code], force=True)
-    except QuoteError:
-        pass
-    stock = Stock.objects.filter(code=code).first()
-    if stock is None:
-        stock = Stock.objects.create(code=code, name=code)
-    return stock
+    return Stock.objects.create(code=code, name=code)
 
 
-def add_watch(user, raw_code: str, *, source_id=None) -> WatchItem:
+def add_watch(user, raw_code: str, *, source_id=None, name: str = "", price=None) -> WatchItem:
     stock = _ensure_stock(raw_code)
     if WatchItem.objects.filter(user=user, stock=stock).exists():
         raise ValidationError("这只股票已经在观察列表里")
+    clean_name = str(name or "").strip()[:64]
+    if clean_name:
+        stock.name = clean_name
+    if price not in (None, ""):
+        try:
+            stock.price = Decimal(str(price))
+            stock.quoted_at = timezone.now()
+        except (InvalidOperation, ValueError):
+            pass
+    if clean_name or stock.quoted_at:
+        stock.save()
     source = _watch_source(user, stock, source_id)
     followed = source is not None or WatchItem.objects.filter(stock=stock).exists()
-    try:
-        market.refresh_quotes([stock.code], force=False)
-        stock.refresh_from_db()
-    except QuoteError:
-        pass
     item = WatchItem.objects.create(
         user=user,
         stock=stock,
@@ -452,18 +453,40 @@ def toggle_comment_like(user, comment_id: int) -> Comment:
     return comment_queryset(user, comment.stock, limit=None).get(pk=comment.id)
 
 
-def risk_for(raw_code: str, *, force: bool) -> RiskReport:
+def client_headlines(raw) -> list[Headline]:
+    if not isinstance(raw, list):
+        return []
+    items = []
+    for row in raw[:8]:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()[:120]
+        if not title:
+            continue
+        items.append(
+            Headline(
+                title=title,
+                media=str(row.get("media") or "").strip()[:40],
+                published_at=str(row.get("published_at") or "").strip()[:19],
+                url=str(row.get("url") or "").strip()[:300],
+            )
+        )
+    return items
+
+
+def risk_for(raw_code: str, *, force: bool, headlines: list[Headline] | None = None, quote_text: str = "") -> RiskReport | None:
     stock = _ensure_stock(raw_code)
     latest = stock.reports.order_by("-id").first()
     fresh_for = timedelta(hours=settings.RISK_FRESH_HOURS)
     fresh = latest and not force and timezone.now() - latest.created_at < fresh_for
     if fresh and latest.checks:
         return latest
-    try:
-        headlines = fetch_headlines(f"{stock.name} {stock.code}".strip())
-    except QuoteError:
+    if not force:
+        return latest
+    if headlines is None:
         headlines = []
-    price = f"现价 {stock.price}，涨跌幅 {stock.change_pct}%" if stock.price is not None else "暂无现价"
+    supplied = str(quote_text or "").strip()
+    price = supplied or (f"现价 {stock.price}，涨跌幅 {stock.change_pct}%" if stock.price is not None else "暂无现价")
     report = build_report(stock.name, stock.code, price, headlines)
     return RiskReport.objects.create(
         stock=stock,

@@ -3,10 +3,10 @@ import type {
   Activity,
   ActivityKind,
   Comment,
+  Headline,
   Holding,
   Invite,
   RiskReport,
-  SearchHit,
   Session,
   Stock,
   StockDetail,
@@ -107,23 +107,20 @@ export const api = {
       body: JSON.stringify({ count }),
     })
   },
-  search(q: string) {
-    return request<{ items: SearchHit[] }>(`/api/stocks/search?q=${encodeURIComponent(q)}`)
-  },
-  quotes(codes: string[]) {
-    return request<{ items: Stock[] }>(`/api/quotes?codes=${encodeURIComponent(codes.join(","))}`)
-  },
-  refresh(codes: string[]) {
+  saveQuotes(quotes: Array<Pick<Stock, "code" | "name" | "price" | "change_pct" | "open" | "high" | "low" | "prev_close">>) {
     return request<{ items: Stock[] }>("/api/quotes", {
       method: "POST",
-      body: JSON.stringify({ codes }),
+      body: JSON.stringify({ quotes }),
     })
   },
   watch() {
     return request<{ items: WatchItem[] }>("/api/watch")
   },
-  addWatch(code: string) {
-    return request<WatchItem>("/api/watch", { method: "POST", body: JSON.stringify({ code }) })
+  addWatch(code: string, extra: { name?: string; price?: string | null } = {}) {
+    return request<WatchItem>("/api/watch", {
+      method: "POST",
+      body: JSON.stringify({ code, name: extra.name || "", price: extra.price || "" }),
+    })
   },
   updateWatch(id: number, body: Record<string, unknown>) {
     return request<WatchItem>(`/api/watch/${id}`, { method: "PATCH", body: JSON.stringify(body) })
@@ -174,7 +171,7 @@ export const api = {
   risk(code: string) {
     return request<RiskReport>(`/api/stocks/${code}/risk`)
   },
-  refreshRisk(code: string) {
-    return request<RiskReport>(`/api/stocks/${code}/risk`, { method: "POST" })
+  refreshRisk(code: string, body: { headlines: Headline[]; quote_text: string }) {
+    return request<RiskReport>(`/api/stocks/${code}/risk`, { method: "POST", body: JSON.stringify(body) })
   },
 }
